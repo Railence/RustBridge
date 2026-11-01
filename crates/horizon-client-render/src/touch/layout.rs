@@ -89,34 +89,45 @@ impl Control {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct Placement {
     pub center: [f32; 2],
-    pub size: f32,
+    /// Width as a fraction of surface height (kept square by default).
+    #[serde(alias = "size")]
+    pub width: f32,
+    pub height: f32,
     pub opacity: f32,
 }
 impl Placement {
     pub(super) fn new(x: f32, y: f32, size: f32) -> Self {
         Self {
             center: [x, y],
-            size,
+            width: size,
+            height: size,
             opacity: 0.65,
         }
     }
+    /// The stored `size` field from old saves — returns the larger dimension.
+    pub fn size(self) -> f32 {
+        self.width.max(self.height)
+    }
     pub fn rect(self, aspect: f32) -> [f32; 4] {
-        let sx = self.size / aspect.max(0.1);
+        let sw = self.width / aspect.max(0.1);
+        let sh = self.height;
         [
-            self.center[0] - sx / 2.0,
-            self.center[1] - self.size / 2.0,
-            sx,
-            self.size,
+            self.center[0] - sw / 2.0,
+            self.center[1] - sh / 2.0,
+            sw,
+            sh,
         ]
     }
     pub fn sanitize(&mut self) {
-        if !self.size.is_finite() {
-            self.size = 0.15;
+        for v in [&mut self.width, &mut self.height] {
+            if !v.is_finite() {
+                *v = 0.15;
+            }
+            *v = v.clamp(0.045, 0.45);
         }
         if !self.opacity.is_finite() {
             self.opacity = 0.65;
         }
-        self.size = self.size.clamp(0.045, 0.45);
         self.opacity = self.opacity.clamp(0.0, 1.0);
         for c in &mut self.center {
             *c = if c.is_finite() {
@@ -258,7 +269,7 @@ impl Settings {
                 (Control::Perspective, 0.60, 0.58),
             ] {
                 let p = &mut row[control as usize];
-                if p.center == [old, 0.055] && p.size == 0.075 {
+                if p.center == [old, 0.055] && p.size() == 0.075 {
                     p.center[0] = new;
                 }
             }
@@ -267,16 +278,17 @@ impl Settings {
         for row in &mut s.layouts {
             let swap = &mut row[Control::Offhand as usize];
             if matches!(swap.center, [0.68, 0.80] | [0.66, 0.38])
-                && (swap.size - 0.09).abs() < 0.0001
+                && (swap.size() - 0.09).abs() < 0.0001
             {
                 swap.center = [0.80, 0.96];
-                swap.size = 0.075;
+                swap.width = 0.075;
+                swap.height = 0.075;
             }
         }
         // Move the old factory sprint position only; keep customized placements.
         for mode in [Mode::Crosshair, Mode::Tap] {
             let sprint = &mut s.layouts[mode.index()][Control::Sprint as usize];
-            if sprint.center == [0.13, 0.50] && (sprint.size - 0.105).abs() < 0.0001 {
+            if sprint.center == [0.13, 0.50] && (sprint.size() - 0.105).abs() < 0.0001 {
                 sprint.center = [0.72, 0.78];
             }
         }
@@ -331,8 +343,13 @@ impl Settings {
         };
         self.custom_buttons.truncate(32);
         self.custom_buttons
-            .retain(|b| super::CustomButton::valid_token(&b.key));
+            .retain(|b| b.keys.iter().any(|k| super::CustomButton::valid_token(k)));
         for button in &mut self.custom_buttons {
+            button.keys.iter_mut().for_each(|k| {
+                if !super::CustomButton::valid_token(k) {
+                    k.clear();
+                }
+            });
             for p in &mut button.layouts {
                 p.sanitize();
             }

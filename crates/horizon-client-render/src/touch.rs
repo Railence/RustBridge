@@ -132,7 +132,7 @@ pub struct TouchControls {
     pub inventory_mode: bool,
     pub editor: Option<editor::Editor>,
     fingers: BTreeMap<u64, (Role, [f32; 2])>,
-    custom_fingers: BTreeMap<u64, String>,
+    custom_fingers: BTreeMap<u64, Vec<String>>,
     custom_events: Vec<(String, bool)>,
     pending: PadState,
     pub aim: Option<[f32; 2]>,
@@ -254,10 +254,10 @@ impl TouchControls {
         let mut p = self.settings.placement(c);
         let factory_swap = c == Control::Offhand
             && self.settings.layouts[self.settings.mode.index()][c as usize].center == [0.80, 0.96]
-            && p.size == 0.075;
+            && p.size() == 0.075;
         // Keep factory top buttons separate on tall surfaces. Custom positions
         // and every landscape layout remain exactly as the player saved them.
-        if self.aspect() < 1.0 && p.center[1] == 0.055 && p.size == 0.075 {
+        if self.aspect() < 1.0 && p.center[1] == 0.055 && p.size() == 0.075 {
             let top = match c {
                 Control::Debug => Some((0.42, 0.18)),
                 Control::Chat => Some((0.46, 0.34)),
@@ -278,7 +278,9 @@ impl TouchControls {
                     } else {
                         new
                     };
-                    p.size = p.size.min(self.aspect() * 0.12);
+                    let cap = self.aspect() * 0.12;
+                    p.width = p.width.min(cap);
+                    p.height = p.height.min(cap);
                 }
             }
         }
@@ -289,8 +291,8 @@ impl TouchControls {
             let inventory = self.placement(Control::Inventory);
             let direction = if self.settings.left_handed { -1.0 } else { 1.0 };
             p.center[0] = inventory.center[0]
-                + direction * ((inventory.size + p.size) * 0.5 + 0.015) / self.aspect();
-            let half = p.size / self.aspect() * 0.5;
+                + direction * ((inventory.size() + p.size()) * 0.5 + 0.015) / self.aspect();
+            let half = p.size() / self.aspect() * 0.5;
             p.center[0] = p.center[0].clamp(half, 1.0 - half);
         }
         p
@@ -318,7 +320,7 @@ impl TouchControls {
                 continue;
             }
             let p = self.placement(control);
-            let size = p.size * h;
+            let size = p.size() * h;
             let (x, y) = (p.center[0] * w - size / 2.0, p.center[1] * h - size / 2.0);
             let opacity = if self.editor.is_some() {
                 p.opacity.max(0.25)
@@ -771,7 +773,7 @@ impl TouchControls {
         for (role, point) in self.fingers.values() {
             match role {
                 Role::Move(anchor) => {
-                    let radius = self.placement(Control::Move).size / 2.0;
+                    let radius = self.placement(Control::Move).size() / 2.0;
                     state.left = [
                         (point[0] - anchor[0]) * self.aspect() / radius,
                         (anchor[1] - point[1]) / radius,
@@ -1308,11 +1310,11 @@ mod tests {
         let mut touch = TouchControls::default();
         touch.viewport(1920, 1080);
         let before = touch.placement(Control::Jump);
-        let stored = touch.settings.placement(Control::Jump).size;
+        let stored = touch.settings.placement(Control::Jump).size();
         touch.settings.button_scale = 1.5;
         let after = touch.placement(Control::Jump);
-        assert!((after.size - before.size * 1.5).abs() < 0.00001);
-        assert_eq!(touch.settings.placement(Control::Jump).size, stored);
+        assert!((after.size() - before.size() * 1.5).abs() < 0.00001);
+        assert_eq!(touch.settings.placement(Control::Jump).size(), stored);
         touch.settings.button_scale = f32::NAN;
         touch.settings.sanitize();
         assert_eq!(touch.settings.button_scale, 1.0);
@@ -1325,7 +1327,7 @@ mod tests {
             loaded: true,
             ..Default::default()
         };
-        touch.settings.layouts[0][Control::Move as usize].size = 0.45;
+        touch.settings.layouts[0][Control::Move as usize].width = 0.45; touch.settings.layouts[0][Control::Move as usize].height = 0.45;
         touch.open_editor();
         let center = touch.placement(Control::Move).center;
         touch.edit_touch(77, center, true, false);
@@ -1376,7 +1378,7 @@ mod tests {
         assert!(!touch.edit_touch(2, [0.5, 0.875], true, true));
         assert!(touch.editor.is_some());
         assert_eq!(touch.settings.custom_buttons.len(), 1);
-        assert_eq!(touch.settings.custom_buttons[0].key, "key.keyboard.unknown");
+        assert_eq!(touch.settings.custom_buttons[0].keys[0], "key.keyboard.unknown");
         touch.cancel_editor();
         assert!(touch.settings.custom_buttons.is_empty());
     }
@@ -1475,7 +1477,7 @@ mod tests {
         }
         t.cancel_editor();
         t.settings.layouts[0][Control::Jump as usize].center = [0.99, 0.99];
-        t.settings.layouts[0][Control::Jump as usize].size = 0.4;
+        t.settings.layouts[0][Control::Jump as usize].width = 0.4; t.settings.layouts[0][Control::Jump as usize].height = 0.4;
         let r = t.placement(Control::Jump).rect(t.aspect());
         assert!(r[0] >= 0.0 && r[1] >= 0.0 && r[0] + r[2] <= 1.00001 && r[1] + r[3] <= 1.00001);
     }
@@ -1690,7 +1692,7 @@ mod tests {
         t.edit_touch(3, [0.13, 0.76], true, true);
         t.edit_touch(4, [0.6, 0.82], true, true);
         t.edit_touch(5, [0.65, 0.73], true, true);
-        assert!(t.settings.placement(Control::Move).size > 0.4);
+        assert!(t.settings.placement(Control::Move).size() > 0.4);
         t.cancel_editor();
         assert_eq!(t.settings.mode, Mode::Tap);
     }
@@ -1720,10 +1722,10 @@ mod tests {
         let mut r: Settings = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(r.mode, Mode::Dpad);
         assert_eq!(r.layouts[2][2].center, [0.4, 0.5]);
-        r.layouts[2][2].size = f32::NAN;
+        r.layouts[2][2].width = f32::NAN; r.layouts[2][2].height = f32::NAN;
         r.sensitivity = f32::INFINITY;
         r.sanitize();
-        assert!(r.layouts[2][2].size.is_finite());
+        assert!(r.layouts[2][2].width.is_finite());
         assert_eq!(r.sensitivity, 1.0);
         let rect = r.placement(Control::Jump).rect(20.0 / 9.0);
         assert!((rect[2] * (20.0 / 9.0) - rect[3]).abs() < 0.0001);
