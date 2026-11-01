@@ -12,18 +12,20 @@ Full revamp of Horizon Android touch control editor:
 - All new fields serialized and persisted
 
 ## Implementation Stages
-1. ✅ **Gear icon + basic side panel** — committed as d0cb0d2 on feature/multi-bind-touch-buttons
-2. 🔄 **New CustomButton fields** (swipeable, toggle_mode, hold_to_toggle, hold_duration, color) — IN PROGRESS
-3. ⬜ **Gear menu: Add Joystick item**
-4. ⬜ **Swipeable runtime behavior** in custom_update
-5. ⬜ **Toggle Mode + Hold-to-Toggle runtime behavior**
-6. ⬜ **Expanded config panel** (all new rows, Duplicate/Reset/Delete)
-7. ⬜ **Add Joystick panel** (reuse existing joystick system)
-8. ⬜ **Persist color** (move from thread_local to CustomButton.color)
-9. ⬜ **Polish + blue selection outline**
+1. ✅ **Gear icon + basic side panel** — committed d0cb0d2
+2. ✅ **New CustomButton fields + runtime behavior** — committed d3bc1d1
+3. ✅ **Gear menu: Add Joystick item** — committed d3bc1d1
+4. ✅ **Swipeable runtime behavior** — committed d3bc1d1
+5. ✅ **Toggle Mode + Hold-to-Toggle runtime behavior** — committed d3bc1d1
+6. ✅ **Expanded config panel** (all rows + Duplicate/Reset/Delete) — committed d3bc1d1
+7. ✅ **Persist color** (moved from thread_local to CustomButton.color) — committed d3bc1d1
+8. ✅ **Blue selection outline** — committed d3bc1d1
+9. ⬜ **Add Joystick panel** (custom movable joystick with size/opacity config)
+10. ⬜ **Scrollable panel** (if panel overflows screen)
 
 ## Completed Stages
 - Stage 1: Gear icon, draggable, opens menu (Add Button/Save/Cancel). Side panel with Name/Keys×4/Scale/Width/Height/Opacity/Color swatch. Committed d0cb0d2.
+- Stage 2–8: Swipeable/Toggle/Hold-to-Toggle, gear menu 4 items, full config panel, color serialized, blue outline. Committed d3bc1d1.
 
 ## Files Modified
 - `crates/horizon-client-render/src/touch/custom.rs` — CustomButton struct, custom_update, draw_custom
@@ -52,14 +54,15 @@ Full revamp of Horizon Android touch control editor:
 - Color is thread_local (in-session only); needs moving to CustomButton.color: [u8; 4]
 - Joystick implementation exists as Mode::Crosshair/Tap joystick — need to check if custom joystick placement is already supported
 
-## Next Steps (Current Session)
-1. Add fields to CustomButton: `swipeable`, `toggle_mode`, `hold_to_toggle`, `hold_duration`, `color`
-2. Add toggle/swipe state to TouchControls
-3. Implement Swipeable logic in custom_update
-4. Implement Toggle/Hold-to-Toggle logic in custom_update
-5. Update gear menu to 4 items (Add Joystick)
-6. Expand editor panel with all new rows
-7. Commit and push
+## Next Steps (Remaining Work)
+1. **Add Joystick** — custom movable joystick via gear menu "Add Joystick". Reuse existing joystick sprite (ui/joystick_frame, ui/joystick_knob). Need:
+   - New field in Settings: `custom_joystick: Option<CustomJoystick>` with center, size, opacity
+   - Draw it like the existing joystick but at the stored position
+   - In editor: draggable, config panel (size/opacity sliders)
+   - The "Add Joystick" item currently shows an error "Joystick already exists" as placeholder
+2. **Scrollable panel** — panels currently have fixed rows; if height overflows screen, need scroll offset + scroll indicator
+3. **tick_hold_timers()** must be called from the game loop each frame — find the game loop call site and add it
+4. **Build verification** — run `cargo check` when network allows to catch any type errors
 
 ## Continuation Prompt (for next session)
 ```
