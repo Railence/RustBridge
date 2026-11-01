@@ -1,0 +1,81 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [android, feature/**]
+  workflow_dispatch:
+    inputs:
+      abi:
+        description: Target ABI
+        type: choice
+        options: [arm64-v8a, armeabi-v7a, x86_64, x86]
+        default: arm64-v8a
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    env:
+      HORIZON_TELEMETRY_URL: "off"
+      CARGO_TARGET_DIR: .local/ci-target
+      CARGO_BUILD_JOBS: "4"
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Set ABI
+        id: abi
+        run: |
+          ABI="${{ github.event.inputs.abi }}"
+          echo "abi=${ABI:-arm64-v8a}" >> "$GITHUB_OUTPUT"
+          case "${ABI:-arm64-v8a}" in
+            arm64-v8a)    echo "target=aarch64-linux-android" >> "$GITHUB_OUTPUT" ;;
+            armeabi-v7a)  echo "target=armv7-linux-androideabi" >> "$GITHUB_OUTPUT" ;;
+            x86_64)       echo "target=x86_64-linux-android" >> "$GITHUB_OUTPUT" ;;
+            x86)          echo "target=i686-linux-android" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Install Android NDK + build-tools
+        run: |
+          sdkmanager "ndk;28.2.13676358" "build-tools;35.0.0"
+
+      - name: Install Rust Android target
+        run: rustup target add "${{ steps.abi.outputs.target }}"
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: android-cargo-${{ steps.abi.outputs.abi }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: android-cargo-${{ steps.abi.outputs.abi }}-
+
+      - name: Cache build artifacts
+        uses: actions/cache@v4
+        with:
+          path: .local/ci-target
+          key: android-target-${{ steps.abi.outputs.abi }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: android-target-${{ steps.abi.outputs.abi }}-
+
+      - name: Build APK
+        run: |
+          python3 tools/android_build.py \
+            --abi "${{ steps.abi.outputs.abi }}" \
+            --public \
+            --profile fast \
+            --sdk "$ANDROID_HOME" \
+            --java-home "$JAVA_HOME_17_X64"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: RustBridge-${{ steps.abi.outputs.abi }}-${{ github.sha }}
+          path: .local/android/*.apk
+          retention-days: 14
