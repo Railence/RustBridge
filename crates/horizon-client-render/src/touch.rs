@@ -1374,8 +1374,12 @@ mod tests {
         let mut touch = TouchControls::default();
         touch.viewport(1920, 1080);
         touch.open_editor();
-        assert!(!touch.edit_touch(1, [0.15, 0.165], true, true));
-        assert!(!touch.edit_touch(2, [0.5, 0.875], true, true));
+        // Tap gear icon to open the gear menu.
+        assert!(!touch.edit_touch(1, [0.92, 0.08], true, true));
+        // Tap "Add Button" in the gear menu (first row, approx y=0.155).
+        assert!(!touch.edit_touch(2, [0.92, 0.155], true, true));
+        // Tap "Create custom button..." at bottom of palette.
+        assert!(!touch.edit_touch(3, [0.5, 0.875], true, true));
         assert!(touch.editor.is_some());
         assert_eq!(touch.settings.custom_buttons.len(), 1);
         assert_eq!(touch.settings.custom_buttons[0].keys[0], "key.keyboard.unknown");
