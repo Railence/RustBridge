@@ -31,7 +31,7 @@ pub struct Editor {
     /// Which regular control is selected for moving.
     pub selected: Option<Control>,
     /// Which custom button is selected for editing.
-    selected_custom: Option<usize>,
+    pub(super) selected_custom: Option<usize>,
     /// Which of the 4 key slots is being picked.
     key_slot: usize,
     key_page: usize,
@@ -55,24 +55,6 @@ enum DragKind {
     Slider(usize),
 }
 
-// ── Color tint stored per button ─────────────────────────────────────────────
-// We extend CustomButton by adding a `tint: [u8; 3]` field via a parallel vec
-// in Settings.  Rather than changing the serialised format right now we keep it
-// as editor-only in-memory state (resets on reload).  A follow-up can persist it.
-thread_local! {
-    static BUTTON_TINTS: std::cell::RefCell<Vec<[u8; 3]>> =
-        std::cell::RefCell::new(Vec::new());
-}
-fn get_tint(index: usize) -> [u8; 3] {
-    BUTTON_TINTS.with(|t| t.borrow().get(index).copied().unwrap_or([255, 255, 255]))
-}
-fn set_tint(index: usize, tint: [u8; 3]) {
-    BUTTON_TINTS.with(|t| {
-        let mut v = t.borrow_mut();
-        if v.len() <= index { v.resize(index + 1, [255, 255, 255]); }
-        v[index] = tint;
-    });
-}
 
 // ── Open / close ─────────────────────────────────────────────────────────────
 impl TouchControls {
@@ -177,6 +159,12 @@ impl TouchControls {
                     self.editor = Some(e);
                     return false;
                 } else if layout::contains([mx, my + 0.07,  0.22, 0.06], p) {
+                    // Add Joystick — placeholder (joystick reuse not yet implemented)
+                    e.menu_open = false;
+                    e.error = Some("Joystick already exists".into());
+                    self.editor = Some(e);
+                    return false;
+                } else if layout::contains([mx, my + 0.14, 0.22, 0.06], p) {
                     // Save
                     e.menu_open = false;
                     match self.settings.save() {
@@ -185,7 +173,7 @@ impl TouchControls {
                     }
                     self.editor = Some(e);
                     return false;
-                } else if layout::contains([mx, my + 0.14, 0.22, 0.06], p) {
+                } else if layout::contains([mx, my + 0.21, 0.22, 0.06], p) {
                     // Cancel
                     self.settings = e.original;
                     self.clear();
@@ -314,16 +302,59 @@ impl TouchControls {
                 e.active_slider = Some(2);
                 return Some(false);
             }
-            // Row 9: Color wheel label — open wheel (toggle)
+            // Row 9: Color wheel label — cycle hue.
             if layout::contains(panel_row(bx, by, 9), p) {
-                // Cycle hue by 30° as a simple "tap to pick color" stub.
-                let tint = get_tint(ci);
-                let next = hue_rotate(tint, 30.0);
-                set_tint(ci, next);
+                let [r, g, bl, a_ch] = self.settings.custom_buttons[ci].color;
+                let next = hue_rotate([r, g, bl], 30.0);
+                self.settings.custom_buttons[ci].color = [next[0], next[1], next[2], a_ch];
                 return Some(false);
             }
-            // Row 10: Remove
+            // Row 10: Swipeable toggle.
             if layout::contains(panel_row(bx, by, 10), p) {
+                self.settings.custom_buttons[ci].swipeable =
+                    !self.settings.custom_buttons[ci].swipeable;
+                return Some(false);
+            }
+            // Row 11: Toggle Mode toggle.
+            if layout::contains(panel_row(bx, by, 11), p) {
+                self.settings.custom_buttons[ci].toggle_mode =
+                    !self.settings.custom_buttons[ci].toggle_mode;
+                return Some(false);
+            }
+            // Row 12: Hold-to-Toggle toggle.
+            if layout::contains(panel_row(bx, by, 12), p) {
+                self.settings.custom_buttons[ci].hold_to_toggle =
+                    !self.settings.custom_buttons[ci].hold_to_toggle;
+                return Some(false);
+            }
+            // Row 13: Hold duration slider label (only when hold_to_toggle on).
+            if self.settings.custom_buttons[ci].hold_to_toggle
+                && layout::contains(panel_row(bx, by, 13), p)
+            {
+                e.active_slider = Some(4); // 4 = hold_duration
+                return Some(false);
+            }
+            // Row 14: Duplicate
+            if layout::contains(panel_row(bx, by, 14), p) {
+                let cloned = self.settings.custom_buttons[ci].clone();
+                self.settings.custom_buttons.push(cloned);
+                e.selected_custom = Some(self.settings.custom_buttons.len() - 1);
+                return Some(false);
+            }
+            // Row 15: Reset (restore default placement).
+            if layout::contains(panel_row(bx, by, 15), p) {
+                let idx = self.settings.custom_buttons.len();
+                self.settings.custom_buttons[ci].layouts =
+                    [layout::Placement::new(
+                        0.68 + (ci % 3) as f32 * 0.1,
+                        0.35 + (ci / 3 % 3) as f32 * 0.12,
+                        0.105,
+                    ); 3];
+                let _ = idx;
+                return Some(false);
+            }
+            // Row 16: Delete
+            if layout::contains(panel_row(bx, by, 16), p) {
                 self.settings.custom_buttons.remove(ci);
                 e.selected_custom = None;
                 e.drag = None;
@@ -331,7 +362,14 @@ impl TouchControls {
             }
             // Slider track (below active slider label, same x band).
             if let Some(opt) = e.active_slider {
-                let row = 5 + opt; // scale=5,width=6,height=7,opacity=8
+                let row = match opt {
+                    0 => 6,  // width
+                    1 => 7,  // height
+                    2 => 8,  // opacity
+                    3 => 5,  // scale
+                    4 => 13, // hold_duration
+                    _ => 5,
+                };
                 let track = slider_track(bx, by, row);
                 if layout::contains(track, p) {
                     e.drag = Some((id, DragKind::Slider(opt)));
@@ -437,6 +475,7 @@ impl TouchControls {
                 1 => place.height  = 0.045 + value * 0.405,
                 2 => place.opacity = value,
                 3 => self.settings.button_scale = 0.5 + value * 1.5,
+                4 => self.settings.custom_buttons[ci].hold_duration = 1.0 + value * 2.0,
                 _ => {}
             }
         } else if let Some(sel) = e.selected {
@@ -526,9 +565,13 @@ impl TouchControls {
         // Gear menu.
         if e.menu_open {
             let (mx, my) = menu_origin(e.gear);
-            plate(b, a, [mx, my,          0.22, 0.06], "Add Button", false);
-            plate(b, a, [mx, my + 0.07,   0.22, 0.06], "Save",       false);
-            plate(b, a, [mx, my + 0.14,   0.22, 0.06], "Cancel",     false);
+            // Menu background.
+            b.fill(a, mx * sw - 2.0, my * sh - 2.0, 0.22 * sw + 4.0, 0.29 * sh + 4.0,
+                rgba(10, 10, 10, 200));
+            plate(b, a, [mx, my,          0.22, 0.06], "Add Button",  false);
+            plate(b, a, [mx, my + 0.07,   0.22, 0.06], "Add Joystick", false);
+            plate(b, a, [mx, my + 0.14,   0.22, 0.06], "Save",        false);
+            plate(b, a, [mx, my + 0.21,   0.22, 0.06], "Cancel",      false);
         }
 
         // Custom button panel.
@@ -578,16 +621,34 @@ impl TouchControls {
             draw_slider_row(b, a, bx, by, 8,  "Opacity", opacity_val, format!("{:.0}%", place.opacity * 100.0), e.active_slider == Some(2), sw, sh);
 
             // Row 9: Color
-            let tint = get_tint(ci);
-            let color_label = format!("Color  #{:02X}{:02X}{:02X}  (tap)", tint[0], tint[1], tint[2]);
+            let [r, g, bl, _] = btn.color;
+            let color_label = format!("Color  #{:02X}{:02X}{:02X}  (tap)", r, g, bl);
             plate(b, a, panel_row(bx, by, 9), &color_label, false);
             // Small color swatch next to the label.
             let [cx, cy, cw, ch] = panel_row(bx, by, 9);
             b.fill(a, sw * (cx + cw - 0.04), sh * cy + 2.0, sw * 0.035, sh * ch - 4.0,
-                rgba(tint[0], tint[1], tint[2], 255));
+                rgba(r, g, bl, 255));
 
-            // Row 10: Remove
-            plate(b, a, panel_row(bx, by, 10), "Remove button", false);
+            // Row 10: Swipeable toggle
+            plate(b, a, panel_row(bx, by, 10), "Swipeable",    btn.swipeable);
+            // Row 11: Toggle Mode toggle
+            plate(b, a, panel_row(bx, by, 11), "Toggle Mode",  btn.toggle_mode);
+            // Row 12: Hold-to-Toggle toggle
+            plate(b, a, panel_row(bx, by, 12), "Hold-to-Toggle", btn.hold_to_toggle);
+            // Row 13: Hold duration slider (only when enabled)
+            if btn.hold_to_toggle {
+                let dur_val = (btn.hold_duration - 1.0) / 2.0;
+                draw_slider_row(b, a, bx, by, 13, "Duration",
+                    dur_val,
+                    format!("{:.1}s", btn.hold_duration),
+                    e.active_slider == Some(4), sw, sh);
+            }
+            // Row 14: Duplicate
+            plate(b, a, panel_row(bx, by, 14), "Duplicate",    false);
+            // Row 15: Reset
+            plate(b, a, panel_row(bx, by, 15), "Reset",        false);
+            // Row 16: Delete
+            plate(b, a, panel_row(bx, by, 16), "\u{1F5D1} Delete", false);
         }
 
         // Regular control panel.

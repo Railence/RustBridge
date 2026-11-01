@@ -2,7 +2,7 @@
 use crate::gamepad::{Button, PadState};
 use crate::hud::{HudAtlas, HudBatch, rgba};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     time::{Duration, Instant},
 };
 const HOLD_DELAY: Duration = Duration::from_millis(350);
@@ -158,6 +158,12 @@ pub struct TouchControls {
     last_marker: Option<([f32; 2], Instant)>,
     last_sneak_tap: Option<Instant>,
     sprint_latched: bool,
+    /// Toggle-active state per custom button index (true = latched on).
+    toggle_active: BTreeMap<usize, bool>,
+    /// Per-finger hold timer: finger_id → (button_index, press_start).
+    hold_timers: HashMap<u64, (usize, Instant)>,
+    /// The single finger allowed to swipe between swipeable buttons.
+    swipe_finger: Option<u64>,
 }
 impl TouchControls {
     pub fn crosshair(&self) -> bool {
@@ -492,7 +498,7 @@ impl TouchControls {
             if let Some(e) = &self.editor
                 && e.selected == Some(control)
             {
-                let green = rgba(255, 255, 255, 255);
+                let green = rgba(80, 160, 255, 255);
                 for (p, q) in [
                     ([x - 1.0, y - 1.0], [x + size + 1.0, y - 1.0]),
                     ([x - 1.0, y + size + 1.0], [x + size + 1.0, y + size + 1.0]),

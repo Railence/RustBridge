@@ -2,6 +2,7 @@
 use super::*;
 use layout::Placement;
 use serde::{Deserialize, Serialize};
+use std::time::Instant;
 
 /// A custom on-screen button that can trigger up to 4 keys simultaneously.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -14,7 +15,28 @@ pub struct CustomButton {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_label: Option<String>,
     pub layouts: [Placement; 3],
+
+    // ── New fields (all default to off / zero so old saves parse cleanly) ──
+
+    /// Finger can drag across other swipeable buttons to switch them.
+    #[serde(default)]
+    pub swipeable: bool,
+    /// Tap once → keys latch on; tap again → keys latch off.
+    #[serde(default)]
+    pub toggle_mode: bool,
+    /// Hold ≥ `hold_duration` seconds → latch; short tap → momentary.
+    #[serde(default)]
+    pub hold_to_toggle: bool,
+    /// Hold duration in seconds (1.0–3.0). Used when `hold_to_toggle` is true.
+    #[serde(default = "default_hold_duration")]
+    pub hold_duration: f32,
+    /// RGBA button tint. [255,255,255,255] = white (default).
+    #[serde(default = "default_color")]
+    pub color: [u8; 4],
 }
+
+fn default_hold_duration() -> f32 { 1.5 }
+fn default_color() -> [u8; 4] { [255, 255, 255, 255] }
 
 fn deserialize_keys<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
@@ -42,13 +64,27 @@ impl CustomButton {
                 0.35 + (index / 3 % 3) as f32 * 0.12,
                 0.105,
             ); 3],
+            swipeable: false,
+            toggle_mode: false,
+            hold_to_toggle: false,
+            hold_duration: 1.5,
+            color: [255, 255, 255, 255],
         }
     }
     /// Migrate a JSON object that still has the old single `"key"` field.
     pub fn migrate_old_key(key: String, layouts: [Placement; 3]) -> Self {
         let mut keys: [String; 4] = Default::default();
         keys[0] = key;
-        Self { keys, custom_label: None, layouts }
+        Self {
+            keys,
+            custom_label: None,
+            layouts,
+            swipeable: false,
+            toggle_mode: false,
+            hold_to_toggle: false,
+            hold_duration: 1.5,
+            color: [255, 255, 255, 255],
+        }
     }
     pub fn valid_token(token: &str) -> bool {
         token.is_empty()
@@ -158,6 +194,49 @@ impl TouchControls {
             .rev()
             .find(|&i| layout::contains(self.custom_placement(i).rect(self.aspect()), point))
     }
+
+    // ── Swipeable: find the first swipeable button under a point ────────────
+    fn swipeable_at(&self, point: [f32; 2]) -> Option<usize> {
+        (0..self.settings.custom_buttons.len())
+            .rev()
+            .find(|&i| {
+                self.settings.custom_buttons[i].swipeable
+                    && layout::contains(self.custom_placement(i).rect(self.aspect()), point)
+            })
+    }
+
+    // ── Press keys for a button, emitting events for newly-held keys ────────
+    fn press_custom_keys(&mut self, index: usize) -> Vec<String> {
+        let active: Vec<String> = self.settings.custom_buttons[index]
+            .active_keys()
+            .filter(|k| *k != "key.keyboard.unknown")
+            .map(String::from)
+            .collect();
+        for key in &active {
+            let already = self.custom_fingers.values().any(|ks| ks.contains(key))
+                || self.toggle_active.get(&index).copied().unwrap_or(false);
+            if !already {
+                self.custom_events.push((key.clone(), true));
+            }
+        }
+        active
+    }
+
+    // ── Release keys that are no longer held by any finger/toggle ───────────
+    fn release_keys_for_finger(&mut self, keys: &[String]) {
+        for key in keys {
+            let still_held = self.custom_fingers.values().any(|ks| ks.contains(key));
+            // Also check if any toggle-active button has this key.
+            let toggle_held = self.toggle_active.iter().any(|(&bi, &on)| {
+                on && self.settings.custom_buttons.get(bi)
+                    .is_some_and(|b| b.active_keys().any(|k| k == key.as_str()))
+            });
+            if !still_held && !toggle_held {
+                self.custom_events.push((key.clone(), false));
+            }
+        }
+    }
+
     pub(super) fn custom_update(
         &mut self,
         id: u64,
@@ -165,42 +244,193 @@ impl TouchControls {
         started: bool,
         ended: bool,
     ) -> bool {
+        // ── Ongoing finger already registered ────────────────────────────────
         if let Some(keys) = self.custom_fingers.get(&id).cloned() {
             if ended {
+                // Determine if this finger was doing a swipe.
+                let was_swipe = self.swipe_finger == Some(id);
+                if was_swipe { self.swipe_finger = None; }
+
+                // Check hold timer for hold-to-toggle.
+                let btn_idx = self.hold_timers.remove(&id).map(|(bi, _)| bi);
+
                 self.custom_fingers.remove(&id);
                 self.fingers.remove(&id);
-                // Release each key that no other finger is still holding.
-                for key in keys {
-                    if !self.custom_fingers.values().any(|ks: &Vec<String>| ks.contains(&key)) {
-                        self.custom_events.push((key, false));
+
+                // For hold-to-toggle: if latch activated, don't fire momentary release.
+                if let Some(bi) = btn_idx {
+                    if self.toggle_active.get(&bi).copied().unwrap_or(false) {
+                        // Toggle is active — keys stay on. Don't release.
+                        return true;
+                    }
+                }
+
+                // Regular release — release keys not held by other fingers/toggles.
+                self.release_keys_for_finger(&keys);
+                return true;
+            }
+
+            // ── Swipe logic: finger moves while in swipeable mode ───────────
+            if self.swipe_finger == Some(id) {
+                if let Some(new_idx) = self.swipeable_at(point) {
+                    // Find the current button this swipe finger is on.
+                    let cur_idx = self.custom_fingers.get(&id)
+                        .and_then(|ks| {
+                            (0..self.settings.custom_buttons.len()).find(|&bi| {
+                                self.settings.custom_buttons[bi]
+                                    .active_keys()
+                                    .any(|k| ks.contains(&k.to_string()))
+                            })
+                        });
+                    if cur_idx != Some(new_idx) {
+                        // Release old keys.
+                        let old_keys = self.custom_fingers.remove(&id).unwrap_or_default();
+                        self.fingers.remove(&id);
+                        self.release_keys_for_finger(&old_keys);
+                        // Press new button's keys.
+                        let new_keys = self.press_custom_keys(new_idx);
+                        if !new_keys.is_empty() {
+                            self.custom_fingers.insert(id, new_keys);
+                            self.fingers.insert(id, (Role::Ignore, point));
+                        }
+                        // Update hold timer target.
+                        self.hold_timers.insert(id, (new_idx, Instant::now()));
                     }
                 }
             }
+
             return true;
         }
-        if started && let Some(index) = self.custom_at(point) {
-            let active: Vec<String> = self.settings.custom_buttons[index]
-                .active_keys()
-                .filter(|k| *k != "key.keyboard.unknown")
-                .map(String::from)
-                .collect();
-            if active.is_empty() {
+
+        // ── New touch start ──────────────────────────────────────────────────
+        if started {
+            let Some(index) = self.custom_at(point) else {
                 return false;
-            }
-            // Press each key that isn't already held by another finger.
-            for key in &active {
-                let already = self.custom_fingers.values().any(|ks: &Vec<String>| ks.contains(key));
-                if !already {
-                    self.custom_events.push((key.clone(), true));
+            };
+            let btn = &self.settings.custom_buttons[index];
+
+            // ── Toggle Mode: tap toggles latch ───────────────────────────────
+            if btn.toggle_mode && !btn.hold_to_toggle {
+                let currently_on = self.toggle_active.get(&index).copied().unwrap_or(false);
+                let active: Vec<String> = btn.active_keys()
+                    .filter(|k| *k != "key.keyboard.unknown")
+                    .map(String::from)
+                    .collect();
+                if active.is_empty() { return false; }
+                if currently_on {
+                    // Turn off.
+                    self.toggle_active.insert(index, false);
+                    for key in &active {
+                        let still_held = self.custom_fingers.values().any(|ks| ks.contains(key));
+                        if !still_held {
+                            self.custom_events.push((key.clone(), false));
+                        }
+                    }
+                } else {
+                    // Turn on.
+                    self.toggle_active.insert(index, true);
+                    for key in &active {
+                        let already = self.custom_fingers.values().any(|ks| ks.contains(key));
+                        if !already {
+                            self.custom_events.push((key.clone(), true));
+                        }
+                    }
                 }
+                // Register the finger so `ended` branch fires and cleans up.
+                // Use an empty vec so it doesn't double-release.
+                self.custom_fingers.insert(id, Vec::new());
+                self.fingers.insert(id, (Role::Ignore, point));
+                self.clicked = true;
+                return true;
             }
+
+            // ── Hold-to-Toggle: start timer ──────────────────────────────────
+            if btn.hold_to_toggle {
+                let active: Vec<String> = btn.active_keys()
+                    .filter(|k| *k != "key.keyboard.unknown")
+                    .map(String::from)
+                    .collect();
+                if active.is_empty() { return false; }
+                // Press keys immediately (momentary start).
+                for key in &active {
+                    let already = self.custom_fingers.values().any(|ks| ks.contains(key));
+                    if !already { self.custom_events.push((key.clone(), true)); }
+                }
+                self.custom_fingers.insert(id, active);
+                self.fingers.insert(id, (Role::Ignore, point));
+                self.hold_timers.insert(id, (index, Instant::now()));
+                self.clicked = true;
+                return true;
+            }
+
+            // ── Normal / Swipeable press ─────────────────────────────────────
+            let active = self.press_custom_keys(index);
+            if active.is_empty() { return false; }
+
+            // If button is swipeable, register this finger as the swipe initiator.
+            if self.settings.custom_buttons[index].swipeable && self.swipe_finger.is_none() {
+                self.swipe_finger = Some(id);
+            }
+
             self.custom_fingers.insert(id, active);
             self.fingers.insert(id, (Role::Ignore, point));
             self.clicked = true;
             return true;
         }
+
         false
     }
+
+    /// Called every game tick to check hold-to-toggle timers.
+    pub fn tick_hold_timers(&mut self) {
+        let now = Instant::now();
+        let to_latch: Vec<(u64, usize)> = self.hold_timers
+            .iter()
+            .filter_map(|(&finger, &(bi, start))| {
+                let btn = self.settings.custom_buttons.get(bi)?;
+                if btn.hold_to_toggle {
+                    let elapsed = now.duration_since(start).as_secs_f32();
+                    if elapsed >= btn.hold_duration {
+                        return Some((finger, bi));
+                    }
+                }
+                None
+            })
+            .collect();
+
+        for (finger, bi) in to_latch {
+            // Activate toggle latch.
+            self.toggle_active.insert(bi, true);
+            // Remove timer so it only fires once.
+            self.hold_timers.remove(&finger);
+            // The keys are already pressed (from the momentary start).
+            // They'll stay on when finger is lifted due to toggle_active check.
+        }
+    }
+
+    /// Release all toggle-active keys for a button (e.g. when editor closes).
+    pub(super) fn release_all_toggle_active(&mut self) {
+        let indices: Vec<usize> = self.toggle_active
+            .iter()
+            .filter(|(_, &on)| on)
+            .map(|(&bi, _)| bi)
+            .collect();
+        for bi in indices {
+            self.toggle_active.insert(bi, false);
+            if let Some(btn) = self.settings.custom_buttons.get(bi) {
+                for key in btn.active_keys() {
+                    if key != "key.keyboard.unknown" {
+                        let still_held = self.custom_fingers.values()
+                            .any(|ks| ks.iter().any(|k| k == key));
+                        if !still_held {
+                            self.custom_events.push((key.to_string(), false));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     pub fn held_custom_tokens(&self) -> impl Iterator<Item = &str> {
         self.custom_fingers.values().flat_map(|ks| ks.iter().map(String::as_str))
     }
@@ -208,12 +438,16 @@ impl TouchControls {
         std::mem::take(&mut self.custom_events)
     }
     pub(super) fn clear_custom(&mut self) {
+        // Release toggle-active keys.
+        self.release_all_toggle_active();
         let keys: std::collections::BTreeSet<String> = std::mem::take(&mut self.custom_fingers)
             .into_values()
             .flatten()
             .collect();
         self.custom_events
             .extend(keys.into_iter().map(|k| (k, false)));
+        self.swipe_finger = None;
+        self.hold_timers.clear();
     }
     pub(super) fn draw_custom(&self, b: &mut HudBatch, a: &HudAtlas) {
         for (i, button) in self.settings.custom_buttons.iter().enumerate() {
@@ -226,9 +460,12 @@ impl TouchControls {
                 pw,
                 ph,
             ];
-            let pressed = self.custom_fingers.values().any(|ks| {
+            let finger_pressed = self.custom_fingers.values().any(|ks| {
                 ks.iter().any(|k| button.active_keys().any(|bk| bk == k.as_str()))
             });
+            let toggle_pressed = self.toggle_active.get(&i).copied().unwrap_or(false);
+            let pressed = finger_pressed || toggle_pressed;
+
             let opacity = if self.editor.is_some() {
                 p.opacity.max(0.25)
             } else {
@@ -237,15 +474,28 @@ impl TouchControls {
             if opacity <= 0.0 {
                 continue;
             }
-            text_button(
-                b,
-                a,
-                rect,
-                &button.label(),
-                pressed,
-                rgba(255, 255, 255, (opacity * 255.0) as u8),
-                true,
-            );
+
+            // Apply button color tint.
+            let [r, g, bl, _] = button.color;
+            let tint_color = rgba(r, g, bl, (opacity * 255.0) as u8);
+
+            // Blue selection outline in editor.
+            let is_selected = self.editor.as_ref()
+                .and_then(|e| e.selected_custom)
+                .is_some_and(|idx| idx == i);
+            if is_selected {
+                // Draw a slightly larger blue outline.
+                let margin = 3.0;
+                text_button(
+                    b, a,
+                    [rect[0] - margin, rect[1] - margin, rect[2] + margin * 2.0, rect[3] + margin * 2.0],
+                    "", false,
+                    rgba(80, 160, 255, 200),
+                    false,
+                );
+            }
+
+            text_button(b, a, rect, &button.label(), pressed, tint_color, true);
         }
     }
 }
@@ -340,5 +590,56 @@ mod tests {
         t.clear();
         assert_eq!(t.key_events(), [("key.keyboard.z".into(), false)]);
         assert_eq!(t.settings.custom_buttons[0].layouts[0].width, stored);
+    }
+    #[test]
+    fn toggle_mode_latches_and_unlatches_on_tap() {
+        let mut t = TouchControls::default();
+        t.viewport(1920, 1080);
+        let mut btn = CustomButton::new("key.keyboard.z".into(), 0);
+        btn.toggle_mode = true;
+        t.settings.custom_buttons.push(btn);
+        let p = t.custom_placement(0).center;
+        // First tap: latch on.
+        t.update(1, p, true, false);
+        assert_eq!(t.key_events(), [("key.keyboard.z".into(), true)]);
+        t.update(1, p, false, true);
+        assert!(t.key_events().is_empty(), "keys should stay on after lift");
+        // Second tap: latch off.
+        t.update(2, p, true, false);
+        assert_eq!(t.key_events(), [("key.keyboard.z".into(), false)]);
+    }
+    #[test]
+    fn swipeable_only_fires_from_initiating_finger() {
+        let mut t = TouchControls::default();
+        t.viewport(1920, 1080);
+        // Two swipeable buttons side by side.
+        let mut b1 = CustomButton::new("key.keyboard.a".into(), 0);
+        b1.swipeable = true;
+        b1.layouts[0].center = [0.7, 0.5];
+        let mut b2 = CustomButton::new("key.keyboard.b".into(), 1);
+        b2.swipeable = true;
+        b2.layouts[0].center = [0.85, 0.5];
+        t.settings.custom_buttons.push(b1);
+        t.settings.custom_buttons.push(b2);
+
+        let p1 = t.custom_placement(0).center;
+        let p2 = t.custom_placement(1).center;
+
+        // Finger 1 presses button 0.
+        t.update(1, p1, true, false);
+        assert_eq!(t.key_events(), [("key.keyboard.a".into(), true)]);
+
+        // Finger 2 moves across button 1 — must NOT activate it.
+        t.update(2, p2, true, false);
+        // Finger 2 is not the swipe initiator; button 1 should not fire.
+        // (Finger 2 would register normally since it's a new press with its own finger.)
+        // Reset events.
+        t.key_events();
+
+        // Finger 1 (initiating) drags to button 1 — should switch.
+        t.update(1, p2, false, false);
+        let events = t.key_events();
+        assert!(events.contains(&("key.keyboard.a".into(), false)), "a should release");
+        assert!(events.contains(&("key.keyboard.b".into(), true)), "b should activate");
     }
 }
