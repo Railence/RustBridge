@@ -32,6 +32,8 @@ pub struct Editor {
     pub selected: Option<Control>,
     /// Which custom button is selected for editing.
     pub(super) selected_custom: Option<usize>,
+    /// Which custom joystick is selected for editing.
+    pub(super) selected_joy: Option<usize>,
     /// Which of the 4 key slots is being picked.
     key_slot: usize,
     key_page: usize,
@@ -66,6 +68,7 @@ impl TouchControls {
             palette: false,
             selected: None,
             selected_custom: None,
+            selected_joy: None,
             key_slot: 0,
             key_page: 0,
             raw_keys: false,
@@ -159,9 +162,22 @@ impl TouchControls {
                     self.editor = Some(e);
                     return false;
                 } else if layout::contains([mx, my + 0.07,  0.22, 0.06], p) {
-                    // Add Joystick — placeholder (joystick reuse not yet implemented)
+                    // Add Joystick — add a new custom joystick if under the limit.
                     e.menu_open = false;
-                    e.error = Some("Joystick already exists".into());
+                    if self.settings.custom_joysticks.len() < 4 {
+                        let idx = self.settings.custom_joysticks.len();
+                        self.settings.custom_joysticks.push({
+                            let mut j = layout::CustomJoystick::default();
+                            // Offset each new joystick so they don't stack.
+                            j.center = [0.18 + idx as f32 * 0.12, 0.65];
+                            j
+                        });
+                        e.selected_joy = Some(idx);
+                        e.selected = None;
+                        e.selected_custom = None;
+                    } else {
+                        e.error = Some("Max 4 custom joysticks".into());
+                    }
                     self.editor = Some(e);
                     return false;
                 } else if layout::contains([mx, my + 0.14, 0.22, 0.06], p) {
@@ -246,9 +262,26 @@ impl TouchControls {
                 self.editor = Some(e);
                 return false;
             }
+            // Custom joysticks.
+            if e.selected_joy.is_none() {
+                let aspect = self.aspect();
+                for (ji, joy) in self.settings.custom_joysticks.iter().enumerate() {
+                    if layout::contains(joy.rect(aspect), p) {
+                        e.selected = None;
+                        e.selected_custom = None;
+                        e.selected_joy = Some(ji);
+                        e.active_slider = None;
+                        let center = joy.center;
+                        e.drag = Some((id, DragKind::Button([p[0] - center[0], p[1] - center[1]])));
+                        self.editor = Some(e);
+                        return false;
+                    }
+                }
+            }
             // Tap on empty space → deselect.
             e.selected = None;
             e.selected_custom = None;
+            e.selected_joy = None;
             e.active_slider = None;
         }
 
@@ -259,6 +292,48 @@ impl TouchControls {
     // ── Panel input handling ─────────────────────────────────────────────────
     /// Returns Some(true) = close editor, Some(false) = handled, None = not consumed.
     fn handle_panel_input(&mut self, e: &mut Editor, id: u64, p: [f32; 2]) -> Option<bool> {
+        // Custom joystick panel.
+        if let Some(ji) = e.selected_joy {
+            let bx = {
+                let cx = self.settings.custom_joysticks[ji].center[0];
+                panel_x(cx)
+            };
+            let by = PANEL_Y;
+
+            // Row 0: Size slider.
+            if layout::contains(panel_row(bx, by, 0), p) {
+                e.active_slider = Some(5); // 5 = joy size
+                return Some(false);
+            }
+            // Row 1: Opacity slider.
+            if layout::contains(panel_row(bx, by, 1), p) {
+                e.active_slider = Some(6); // 6 = joy opacity
+                return Some(false);
+            }
+            // Row 2: Delete joystick.
+            if layout::contains(panel_row(bx, by, 2), p) {
+                self.settings.custom_joysticks.remove(ji);
+                e.selected_joy = None;
+                e.drag = None;
+                return Some(false);
+            }
+            // Slider track.
+            if let Some(opt) = e.active_slider {
+                let row = match opt { 5 => 0, 6 => 1, _ => 0 };
+                let track = slider_track(bx, by, row);
+                if layout::contains(track, p) {
+                    e.drag = Some((id, DragKind::Slider(opt)));
+                    return Some(false);
+                }
+            }
+            let panel = [bx, by, PANEL_W, 0.30];
+            if !layout::contains(panel, p) {
+                e.selected_joy = None;
+                e.active_slider = None;
+            }
+            return Some(false);
+        }
+
         // Custom button panel.
         if let Some(ci) = e.selected_custom {
             let bx = {
@@ -435,6 +510,16 @@ impl TouchControls {
         let mut center = [p[0] - offset[0], p[1] - offset[1]];
         if self.settings.left_handed { center[0] = 1.0 - center[0]; }
 
+        if let Some(ji) = e.selected_joy {
+            let joy = &mut self.settings.custom_joysticks[ji];
+            let half = joy.size / 2.0;
+            joy.center = [
+                center[0].clamp(half / aspect, 1.0 - half / aspect),
+                center[1].clamp(half, 1.0 - half),
+            ];
+            return;
+        }
+
         if let Some(ci) = e.selected_custom {
             let place = &mut self.settings.custom_buttons[ci]
                 .layouts[self.settings.mode.index()];
@@ -456,7 +541,9 @@ impl TouchControls {
 
     fn apply_slider(&mut self, e: &mut Editor, p: [f32; 2], opt: usize) {
         // Determine panel x so we can compute slider value from screen coords.
-        let px = if let Some(ci) = e.selected_custom {
+        let px = if let Some(ji) = e.selected_joy {
+            panel_x(self.settings.custom_joysticks[ji].center[0])
+        } else if let Some(ci) = e.selected_custom {
             panel_x(self.custom_placement(ci).center[0])
         } else if let Some(sel) = e.selected {
             panel_x(self.placement(sel).center[0])
@@ -467,6 +554,14 @@ impl TouchControls {
         let track_w = PANEL_W - 0.04;
         let value = ((p[0] - track_x) / track_w).clamp(0.0, 1.0);
 
+        if let Some(ji) = e.selected_joy {
+            match opt {
+                5 => self.settings.custom_joysticks[ji].size    = 0.06 + value * 0.34,
+                6 => self.settings.custom_joysticks[ji].opacity = value,
+                _ => {}
+            }
+            return;
+        }
         if let Some(ci) = e.selected_custom {
             let place = &mut self.settings.custom_buttons[ci]
                 .layouts[self.settings.mode.index()];
@@ -649,6 +744,22 @@ impl TouchControls {
             plate(b, a, panel_row(bx, by, 15), "Reset",        false);
             // Row 16: Delete
             plate(b, a, panel_row(bx, by, 16), "\u{1F5D1} Delete", false);
+        }
+
+        // Custom joystick panel.
+        if let Some(ji) = e.selected_joy {
+            let joy = &self.settings.custom_joysticks[ji];
+            let bx = panel_x(joy.center[0]);
+            let by = PANEL_Y;
+            b.fill(a, sw * bx, sh * by, sw * PANEL_W, sh * 0.28, rgba(20, 20, 20, 230));
+            let title_col = rgba(245, 245, 245, 255);
+            b.text(a, "Joystick Settings", sw * (bx + 0.02), sh * (by + 0.02), title_col, false);
+
+            let size_val = (joy.size - 0.06) / 0.34;
+            let opacity_val = joy.opacity;
+            draw_slider_row(b, a, bx, by, 0, "Size",    size_val,    format!("{:.0}%", joy.size * 100.0),    e.active_slider == Some(5), sw, sh);
+            draw_slider_row(b, a, bx, by, 1, "Opacity", opacity_val, format!("{:.0}%", joy.opacity * 100.0), e.active_slider == Some(6), sw, sh);
+            plate(b, a, panel_row(bx, by, 2), "\u{1F5D1} Delete Joystick", false);
         }
 
         // Regular control panel.

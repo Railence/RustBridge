@@ -138,6 +138,37 @@ impl Placement {
         }
     }
 }
+/// An additional user-placed joystick (beyond the built-in Move control).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CustomJoystick {
+    /// Normalised center position (x fraction of width, y fraction of height).
+    pub center: [f32; 2],
+    /// Radius as a fraction of screen height.
+    pub size: f32,
+    /// Opacity (0.0–1.0).
+    pub opacity: f32,
+}
+impl Default for CustomJoystick {
+    fn default() -> Self {
+        Self { center: [0.18, 0.65], size: 0.16, opacity: 0.85 }
+    }
+}
+impl CustomJoystick {
+    pub fn rect(&self, aspect: f32) -> [f32; 4] {
+        let s = self.size;
+        [self.center[0] - s / aspect / 2.0, self.center[1] - s / 2.0, s / aspect, s]
+    }
+    pub fn sanitize(&mut self) {
+        if !self.size.is_finite() { self.size = 0.16; }
+        self.size = self.size.clamp(0.06, 0.40);
+        if !self.opacity.is_finite() { self.opacity = 0.85; }
+        self.opacity = self.opacity.clamp(0.0, 1.0);
+        for c in &mut self.center {
+            *c = if c.is_finite() { c.clamp(0.025, 0.975) } else { 0.5 };
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -155,6 +186,9 @@ pub struct Settings {
     pub circle_size: f32,
     pub button_scale: f32,
     pub custom_buttons: Vec<super::CustomButton>,
+    /// Additional user-placed joysticks (empty by default).
+    #[serde(default)]
+    pub custom_joysticks: Vec<CustomJoystick>,
     pub analog_movement: bool,
     pub sprint_button: bool,
     pub sprint_toggle: bool,
@@ -234,6 +268,7 @@ impl Default for Settings {
             circle_size: 32.0,
             button_scale: 1.0,
             custom_buttons: Vec::new(),
+            custom_joysticks: Vec::new(),
             analog_movement: false,
             sprint_button: true,
             sprint_toggle: false,
@@ -356,6 +391,9 @@ impl Settings {
         }
         for p in self.layouts.iter_mut().flatten() {
             p.sanitize();
+        }
+        for j in &mut self.custom_joysticks {
+            j.sanitize();
         }
     }
     pub fn save(&self) -> std::io::Result<()> {

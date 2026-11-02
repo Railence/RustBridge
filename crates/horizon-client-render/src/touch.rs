@@ -8,6 +8,7 @@ use std::{
 const HOLD_DELAY: Duration = Duration::from_millis(350);
 mod custom;
 mod editor;
+mod joystick;
 pub use custom::CustomButton;
 pub mod layout;
 pub use layout::{Control, Mode, Settings};
@@ -164,6 +165,10 @@ pub struct TouchControls {
     hold_timers: HashMap<u64, (usize, Instant)>,
     /// The single finger allowed to swipe between swipeable buttons.
     swipe_finger: Option<u64>,
+    /// Custom joystick knob offsets: joystick_index → [dx, dy] in normalised coords.
+    joy_fingers: HashMap<u64, [f32; 2]>,
+    /// Maps touch finger_id → custom joystick index.
+    joy_finger_to_joy: HashMap<u64, usize>,
 }
 impl TouchControls {
     pub fn crosshair(&self) -> bool {
@@ -510,6 +515,7 @@ impl TouchControls {
             }
         }
         self.draw_custom(b, a);
+        self.draw_custom_joysticks(b, a);
         if self.editor.is_some() {
             self.draw_editor(b, a);
         } else if let Some(point) = self.pointer() {
@@ -560,6 +566,9 @@ impl TouchControls {
     }
     /// Coordinates are fractions of the drawable surface. Returns a look delta.
     pub fn update(&mut self, id: u64, point: [f32; 2], started: bool, ended: bool) -> [f32; 2] {
+        if self.custom_joy_update(id, point, started, ended) {
+            return [0.0; 2];
+        }
         if self.custom_update(id, point, started, ended) {
             return [0.0; 2];
         }
@@ -700,6 +709,8 @@ impl TouchControls {
     pub fn clear(&mut self) {
         self.clear_custom();
         self.fingers.clear();
+        self.joy_fingers.clear();
+        self.joy_finger_to_joy.clear();
         self.last_sneak_tap = None;
         self.sprint_latched = false;
         self.pending = PadState::default();
@@ -754,6 +765,7 @@ impl TouchControls {
                 }
             }
         }
+        self.apply_custom_joy_movement(&mut state);
         state
     }
     /// Keep a contextual hold as use even after feeding consumed its last item.
