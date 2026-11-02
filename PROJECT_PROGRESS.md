@@ -20,60 +20,45 @@ Full revamp of Horizon Android touch control editor:
 6. ✅ **Expanded config panel** (all rows + Duplicate/Reset/Delete) — committed d3bc1d1
 7. ✅ **Persist color** (moved from thread_local to CustomButton.color) — committed d3bc1d1
 8. ✅ **Blue selection outline** — committed d3bc1d1
-9. ⬜ **Add Joystick panel** (custom movable joystick with size/opacity config)
-10. ⬜ **Scrollable panel** (if panel overflows screen)
+9. ✅ **Add Joystick** — CustomJoystick struct, draw, input, config panel — committed 7e5dcd0
+10. ✅ **tick_hold_timers() game loop** — called from pad.rs before poll_state() — committed d1a5528
+11. ⬜ **Scrollable panel** (if panel overflows screen)
 
 ## Completed Stages
-- Stage 1: Gear icon, draggable, opens menu (Add Button/Save/Cancel). Side panel with Name/Keys×4/Scale/Width/Height/Opacity/Color swatch. Committed d0cb0d2.
-- Stage 2–8: Swipeable/Toggle/Hold-to-Toggle, gear menu 4 items, full config panel, color serialized, blue outline. Committed d3bc1d1.
+- Stage 1: Gear icon, draggable, opens menu. Side panel with Name/Keys×4/Scale/Width/Height/Opacity/Color swatch.
+- Stage 2–8: Swipeable/Toggle/Hold-to-Toggle, gear menu 4 items, full config panel, color serialized, blue outline.
+- Stage 9: Custom joystick system — `CustomJoystick` struct in layout.rs, `joystick.rs` module with draw/update/apply_movement, joy_fingers tracking, editor Add Joystick button (up to 4), drag to move, size+opacity sliders, Delete, joystick config panel in draw_editor.
+- Stage 10: `tick_hold_timers()` called in `crates/horizon-client/src/game/pad.rs` Android section before `poll_state()`.
 
 ## Files Modified
-- `crates/horizon-client-render/src/touch/custom.rs` — CustomButton struct, custom_update, draw_custom
-- `crates/horizon-client-render/src/touch/editor.rs` — Editor struct, all draw/input code
-- `crates/horizon-client-render/src/touch.rs` — test updated for gear flow
-- `crates/horizon-client-render/src/touch/layout.rs` — no changes yet (Settings/Placement)
+- `crates/horizon-client-render/src/touch/custom.rs` — CustomButton struct, custom_update, draw_custom, tick_hold_timers
+- `crates/horizon-client-render/src/touch/editor.rs` — Editor struct, all draw/input code, selected_joy, joystick panel
+- `crates/horizon-client-render/src/touch.rs` — joy_fingers/joy_finger_to_joy fields, joystick mod, wiring
+- `crates/horizon-client-render/src/touch/layout.rs` — CustomJoystick struct, custom_joysticks in Settings
+- `crates/horizon-client-render/src/touch/joystick.rs` — NEW: draw/update/apply_movement for custom joysticks
+- `crates/horizon-client/src/game/pad.rs` — tick_hold_timers() call in Android game tick
 
 ## Key Technical Facts
-- `CustomButton.layouts: [Placement; 3]` — one per Mode index
-- `TouchControls.custom_fingers: BTreeMap<u64, Vec<String>>` — finger→keys
-- `TouchControls.custom_events: Vec<(String, bool)>` — press/release queue
-- `custom_update(id, point, started, ended)` — returns true if consumed
-- `Settings.button_scale: f32` — global scale (0.5–2.0)
-- Normalised coords: x fraction of width, y fraction of height
-- `panel_x(cx) -> f32`: 0.02 if button.cx > 0.5, else 0.62
-- Gear menu rows: `[mx, my+0..], [mx, my+0.07], [mx, my+0.14], [mx, my+0.21]`
-- Color currently in thread_local BUTTON_TINTS (not persisted) — needs moving to CustomButton
+- `CustomJoystick { center: [f32;2], size: f32, opacity: f32 }` — stored in Settings.custom_joysticks: Vec
+- Max 4 custom joysticks (editor enforces)
+- `joy_fingers: HashMap<u64, [f32;2]>` — joy_idx → knob offset (on TouchControls, keyed by joy index NOT finger id)
+- `joy_finger_to_joy: HashMap<u64, usize>` — finger_id → joy_idx
+- `apply_custom_joy_movement` only fires if built-in joystick is inactive (state.left == [0,0])
+- Slider opt 5 = joy size (0.06..0.40), opt 6 = joy opacity
+- `panel_x(cx)`: 0.02 if cx > 0.5, else 0.62
+- `draw_slider_row(b, a, px, base_y, row, label, value, value_str, active, sw, sh)`
 
-## Toggle/Swipeable State Tracking Plan
-- Add to `TouchControls`: `toggle_active: BTreeMap<usize, bool>` (button index → toggled?)
-- Add to `TouchControls`: `hold_timers: BTreeMap<u64, (usize, Instant)>` (finger → (btn_idx, press_time))
-- Add to `TouchControls`: `swipe_finger: Option<u64>` (the one finger allowed to swipe)
+## Known Issues
+- Build verification blocked (cargo check times out — rust-toolchain pins 1.95.0, not downloadable in sandbox; stable 1.97.0 is installed but times out compiling full crate tree)
+- Scrollable panel not yet implemented (low priority — most panels fit in screen height)
 
-## Known Issues / Decisions
-- Build verification blocked (cargo check times out — network can't reach static.rust-lang.org)
-- Color is thread_local (in-session only); needs moving to CustomButton.color: [u8; 4]
-- Joystick implementation exists as Mode::Crosshair/Tap joystick — need to check if custom joystick placement is already supported
-
-## Next Steps (Remaining Work)
-1. **Add Joystick** — custom movable joystick via gear menu "Add Joystick". Reuse existing joystick sprite (ui/joystick_frame, ui/joystick_knob). Need:
-   - New field in Settings: `custom_joystick: Option<CustomJoystick>` with center, size, opacity
-   - Draw it like the existing joystick but at the stored position
-   - In editor: draggable, config panel (size/opacity sliders)
-   - The "Add Joystick" item currently shows an error "Joystick already exists" as placeholder
-2. **Scrollable panel** — panels currently have fixed rows; if height overflows screen, need scroll offset + scroll indicator
-3. **tick_hold_timers()** must be called from the game loop each frame — find the game loop call site and add it
-4. **Build verification** — run `cargo check` when network allows to catch any type errors
+## Remaining Work
+1. **Scrollable panel** — if a panel's content (e.g. button config with 17 rows) overflows the screen, add scroll_offset + up/down scroll indicator. Tracked on Editor struct.
 
 ## Continuation Prompt (for next session)
 ```
-Read PROJECT_PROGRESS.md first, then inspect the current state of:
-- crates/horizon-client-render/src/touch/custom.rs
-- crates/horizon-client-render/src/touch/editor.rs
-- crates/horizon-client-render/src/touch.rs
-- crates/horizon-client-render/src/touch/layout.rs
-
+Read PROJECT_PROGRESS.md first, then inspect the current state of the modified files listed there.
 Do NOT assume the previous session's description is still accurate — check the actual code.
-
 Continue implementing the touch control editor revamp from the exact stage noted in PROJECT_PROGRESS.md.
 Preserve all existing functionality. Update PROJECT_PROGRESS.md at every milestone.
 When your message limit approaches, stop adding features, commit working state, update PROJECT_PROGRESS.md with exact next steps, and provide a SESSION HANDOFF summary.
