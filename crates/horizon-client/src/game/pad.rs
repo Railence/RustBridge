@@ -200,6 +200,7 @@ impl Game<'_> {
         #[cfg(target_os = "android")]
         let state = {
             self.pad.touch.shield_available = self.touch_shield_available();
+            self.pad.touch.tick_hold_timers();
             let mut touch = self.pad.touch.poll_state();
             self.pad.touch_shield = crate::touch_visible()
                 && !self.pad_in_menu()
